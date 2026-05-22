@@ -38,7 +38,7 @@ LLM_API_KEY = (
 # "gpt-4o-mini"
 # "groq/llama-3.3-70b-versatile"
 
-LLM_MODEL = "gemini"
+LLM_MODEL = "gpt-4o-mini"
 
 # =================================================================
 # LINKEDIN SEARCH CONFIGURATION
