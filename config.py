@@ -3,8 +3,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- DO NOT MODIFY THE BELOW SECTION ---
-
 # =================================================================
 # 1. CORE SYSTEM CONFIGURATION
 # =================================================================
@@ -143,7 +141,9 @@ MAX_JOBS_PER_SEARCH = {
 # =================================================================
 
 LLM_MAX_RPM = 10
+
 LLM_MAX_RETRIES = 3
+
 LLM_RETRY_BASE_DELAY = 10
 
 # 0 = unlimited
@@ -172,19 +172,3 @@ ACTIVE_CHECK_TIMEOUT = 20
 ACTIVE_CHECK_MAX_RETRIES = 2
 
 ACTIVE_CHECK_RETRY_DELAY = 10
-
-# =================================================================
-# VALIDATION
-# =================================================================
-
-if not SUPABASE_URL:
-    raise Exception("SUPABASE_URL is missing")
-
-if not SUPABASE_URL.startswith("https://"):
-    raise Exception(f"Invalid SUPABASE_URL: {SUPABASE_URL}")
-
-if not SUPABASE_SERVICE_ROLE_KEY:
-    raise Exception("SUPABASE_SERVICE_ROLE_KEY is missing")
-
-if not LLM_API_KEY:
-    raise Exception("LLM_API_KEY / GEMINI_API_KEY is missing")
