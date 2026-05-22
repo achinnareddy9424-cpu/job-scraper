@@ -23,10 +23,10 @@ BASE_RESUME_PATH = "resume.json"
 # API Keys
 LLM_API_KEY = (
     os.environ.get("LLM_API_KEY")
+    or os.environ.get("OPENAI_API_KEY")
     or os.environ.get("GEMINI_API_KEY")
     or os.environ.get("GEMINI_FIRST_API_KEY")
 )
-
 # =================================================================
 # 2. USER PREFERENCES
 # =================================================================
