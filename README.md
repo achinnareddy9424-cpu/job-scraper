@@ -248,3 +248,13 @@ This project is for educational and personal use only. Scraping websites like Li
 ## Contact
 
 If you have any questions, suggestions, or issues, please open an issue on the GitHub repository.
+
+-- 1. Clear out the scraped jobs and application logs
+TRUNCATE TABLE "public"."jobs" RESTART IDENTITY CASCADE;
+
+-- 2. Clear out any custom resumes generated for those jobs
+TRUNCATE TABLE "public"."customized_resumes" RESTART IDENTITY CASCADE;
+
+-- 3. Clear out your base parsed resume profile data (Optional)
+-- Run this line ONLY if you want to re-run the 'Parse Resume Manually' GitHub Action.
+TRUNCATE TABLE "public"."base_resume" RESTART IDENTITY CASCADE;
