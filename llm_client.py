@@ -16,7 +16,7 @@ Usage:
         prompt="Hello!",
         system_prompt="You are a helpful assistant.",
         temperature=0.2,
-        response_format=MyPydanticModel  # Optional structured output
+        response_format=MyPydanticModel
     )
 """
 
@@ -25,7 +25,7 @@ import time
 import random
 import logging
 import threading
-from typing import Optional, Any, Type, List
+from typing import Optional, Type, List
 
 import litellm
 from pydantic import BaseModel
@@ -34,14 +34,15 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Suppress litellm's verbose logging unless DEBUG is set
+# Suppress LiteLLM verbose logs unless enabled
 litellm.suppress_debug_info = True
+
 if os.environ.get("LLM_DEBUG", "").lower() == "true":
     litellm.set_verbose = True
 
 
 class RateLimiter:
-    """Token-bucket rate limiter for requests per minute."""
+    """Simple token bucket rate limiter."""
 
     def __init__(self, max_rpm: int):
         self.max_rpm = max_rpm
@@ -50,33 +51,31 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def acquire(self):
-        """Block until a request token is available."""
         while True:
             with self._lock:
                 now = time.monotonic()
                 elapsed = now - self.last_refill
-                # Refill tokens based on elapsed time
+
                 refill = elapsed * (self.max_rpm / 60.0)
+
                 self.tokens = min(self.max_rpm, self.tokens + refill)
+
                 self.last_refill = now
 
                 if self.tokens >= 1:
                     self.tokens -= 1
                     return
 
-            # Wait a bit before retrying
             time.sleep(0.5)
 
 
 class LLMClient:
     """
-    Universal LLM client powered by LiteLLM with intelligent fallback.
-
-    Wraps litellm.completion() with rate limiting, exponential backoff,
-    daily budget tracking, and intelligent fallback across multiple providers:
-    - Primary: Gemini
-    - Fallback 1: OpenAI
-    - Fallback 2: Groq
+    Universal LLM client with:
+    - Rate limiting
+    - Exponential backoff
+    - Daily budget tracking
+    - Multi-provider fallback
     """
 
     def __init__(
@@ -90,79 +89,84 @@ class LLMClient:
         request_delay: float = 0,
         fallback_models: Optional[List[str]] = None,
     ):
-        """
-        Initialize the LLM client.
-
-        Args:
-            model: Primary LiteLLM model string (e.g., "gemini/gemini-2.5-flash-lite")
-            api_key: API key for the provider (auto-detected from env if not set)
-            max_rpm: Maximum requests per minute
-            max_retries: Max retries on rate-limit errors
-            retry_base_delay: Base delay in seconds for exponential backoff
-            daily_budget: Max requests per day (0 = unlimited)
-            request_delay: Fixed delay between requests in seconds
-            fallback_models: List of fallback models in priority order
-        """
         self.model = model
+
+        # NOTE:
+        # self.api_key is intentionally NOT used globally anymore
+        # because fallback providers require different keys.
         self.api_key = api_key
+
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.daily_budget = daily_budget
         self.request_delay = request_delay
+
         self.rate_limiter = RateLimiter(max_rpm)
+
         self.fallback_models = fallback_models or []
 
-        # Daily budget tracking
         self._daily_count = 0
         self._daily_reset_time = time.time()
 
-        # Set API key in environment if provided (LiteLLM reads from env)
-        if api_key:
-            self._set_api_key_env(api_key)
-
-    def _set_api_key_env(self, api_key: str):
-        """Set the appropriate environment variable based on the model provider."""
-        provider = self.model.split("/")[0] if "/" in self.model else self.model.lower()
-        if provider == "google":
-            provider = "gemini"
-        env_var_map = {
-            "gemini": "GEMINI_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "groq": "GROQ_API_KEY",
-            "deepseek": "DEEPSEEK_API_KEY",
-            "mistral": "MISTRAL_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-        }
-        env_var = env_var_map.get(provider)
-        if env_var and not os.environ.get(env_var):
-            os.environ[env_var] = api_key
-
     def _check_daily_budget(self):
-        """Check if daily request budget is exceeded. Resets at midnight."""
-        if self.daily_budget <= 0:
-            return  # Unlimited
+        """Reset and validate daily budget."""
 
-        # Reset counter if 24 hours have passed
+        if self.daily_budget <= 0:
+            return
+
         if time.time() - self._daily_reset_time > 86400:
             self._daily_count = 0
             self._daily_reset_time = time.time()
 
         if self._daily_count >= self.daily_budget:
             raise RuntimeError(
-                f"Daily LLM request budget exceeded ({self.daily_budget} requests). "
-                f"Increase LLM_DAILY_REQUEST_BUDGET or wait for reset."
+                f"Daily LLM budget exceeded ({self.daily_budget})"
             )
 
     def _get_model_pool(self) -> List[str]:
-        """
-        Get the model pool for fallback strategy.
-        
-        Returns a list of models in priority order:
-        1. Primary model
-        2. Fallback models (if configured)
-        """
+        """Return primary + fallback model pool."""
         return [self.model] + self.fallback_models
+
+    def _get_provider_from_model(self, model: str) -> str:
+        """
+        Detect provider from model name.
+        """
+
+        if model.startswith("gpt"):
+            return "openai"
+
+        if model.startswith("gemini"):
+            return "gemini"
+
+        if model.startswith("groq/"):
+            return "groq"
+
+        if model.startswith("claude"):
+            return "anthropic"
+
+        if "/" in model:
+            return model.split("/")[0]
+
+        return model.lower()
+
+    def _get_api_key_for_model(self, model: str) -> Optional[str]:
+        """
+        Return correct API key for the given model provider.
+        """
+
+        provider = self._get_provider_from_model(model)
+
+        key_map = {
+            "openai": os.getenv("OPENAI_API_KEY"),
+            "gemini": os.getenv("GEMINI_API_KEY"),
+            "groq": os.getenv("GROQ_API_KEY"),
+            "anthropic": os.getenv("ANTHROPIC_API_KEY"),
+            "deepseek": os.getenv("DEEPSEEK_API_KEY"),
+            "mistral": os.getenv("MISTRAL_API_KEY"),
+            "openrouter": os.getenv("OPENROUTER_API_KEY"),
+        }
+
+        return key_map.get(provider)
 
     def generate_content(
         self,
@@ -173,129 +177,178 @@ class LLMClient:
         model_override: Optional[str] = None,
     ) -> str:
         """
-        Generate content using the configured LLM with intelligent fallback.
-
-        Args:
-            prompt: The user prompt/message
-            system_prompt: Optional system instruction
-            temperature: Temperature for generation (0.0-1.0)
-            response_format: Optional Pydantic model for structured JSON output
-            model_override: Override the default model for this call
-
-        Returns:
-            The generated text content as a string
-
-        Raises:
-            RuntimeError: If daily budget is exceeded
-            Exception: If all retries are exhausted
+        Generate content using intelligent fallback.
         """
+
         self._check_daily_budget()
 
         messages = []
 
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+            messages.append(
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                }
+            )
 
-        # Build base kwargs for litellm.completion
+        messages.append(
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        )
+
         base_kwargs = {
             "messages": messages,
             "temperature": temperature,
         }
 
-        # Add API key if set
-        if self.api_key:
-            base_kwargs["api_key"] = self.api_key
-
-        # Add structured output (Pydantic model)
         if response_format is not None:
             base_kwargs["response_format"] = response_format
 
-        # Get model pool (primary + fallbacks)
-        model_pool = [model_override] if model_override else self._get_model_pool()
+        model_pool = (
+            [model_override]
+            if model_override
+            else self._get_model_pool()
+        )
+
         pool_index = 0
-        
-        # Calculate max attempts to cover all models in pool with retries
+
         max_attempts = len(model_pool) + self.max_retries
 
         last_exception = None
 
         for attempt in range(max_attempts):
+
+            current_model = model_pool[
+                pool_index % len(model_pool)
+            ]
+
             try:
-                # Rate limiting
                 self.rate_limiter.acquire()
 
-                # Fixed inter-request delay (only on first attempt)
                 if self.request_delay > 0 and attempt == 0:
                     time.sleep(self.request_delay)
-                    
-                # Get current model from pool
-                current_model = model_pool[pool_index % len(model_pool)]
+
                 kwargs = base_kwargs.copy()
+
                 kwargs["model"] = current_model
 
-                logger.debug(f"LLM request attempt {attempt + 1}/{max_attempts} to {current_model}")
+                # IMPORTANT:
+                # Dynamically choose correct API key
+                api_key = self._get_api_key_for_model(
+                    current_model
+                )
+
+                if api_key:
+                    kwargs["api_key"] = api_key
+
+                logger.info(
+                    f"Using model: {current_model}"
+                )
+
+                if api_key:
+                    logger.info(
+                        f"API key prefix: {api_key[:6]}"
+                    )
+
                 response = litellm.completion(**kwargs)
 
-                # Track daily usage
                 self._daily_count += 1
 
-                # Extract text from response
-                content = response.choices[0].message.content
+                content = (
+                    response
+                    .choices[0]
+                    .message
+                    .content
+                )
+
                 if content:
-                    logger.info(f"LLM request successful using model: {current_model}")
+                    logger.info(
+                        f"LLM request successful using {current_model}"
+                    )
+
                     return content.strip()
-                else:
-                    logger.warning("LLM returned empty content")
-                    return ""
+
+                logger.warning(
+                    f"Empty response from {current_model}"
+                )
+
+                return ""
 
             except Exception as e:
+
                 last_exception = e
+
                 error_str = str(e).lower()
 
-                # Check if it's a rate limit / quota error
-                is_rate_limit = any(keyword in error_str for keyword in [
-                    "429", "rate_limit", "rate limit", "resource_exhausted",
-                    "quota", "too many requests", "retry"
-                ])
-
-                current_model = model_pool[pool_index % len(model_pool)]
+                is_rate_limit = any(
+                    keyword in error_str
+                    for keyword in [
+                        "429",
+                        "rate_limit",
+                        "rate limit",
+                        "resource_exhausted",
+                        "quota",
+                        "too many requests",
+                        "retry",
+                    ]
+                )
 
                 if attempt < max_attempts - 1:
+
+                    next_model_index = (
+                        pool_index + 1
+                    ) % len(model_pool)
+
+                    next_model = model_pool[
+                        next_model_index
+                    ]
+
                     if is_rate_limit:
-                        # Try next model in fallback pool
-                        next_model_index = (pool_index + 1) % len(model_pool)
-                        next_model = model_pool[next_model_index]
-                        
-                        delay = random.uniform(1, 4) if next_model_index != 0 else random.uniform(2, 8)
+
+                        delay = random.uniform(1, 4)
+
                         logger.warning(
-                            f"Rate limit/quota hit for {current_model}. "
-                            f"Falling back to {next_model}... "
-                            f"(attempt {attempt + 1}/{max_attempts}). Retrying in {delay:.1f}s. Error: {e}"
+                            f"Rate limit on {current_model}. "
+                            f"Falling back to {next_model}. "
+                            f"Retrying in {delay:.1f}s. "
+                            f"Error: {e}"
                         )
-                        pool_index = next_model_index
+
                     else:
-                        # Non-rate-limit error — try next model in fallback pool
-                        next_model_index = (pool_index + 1) % len(model_pool)
-                        next_model = model_pool[next_model_index]
-                        
-                        # Exponential backoff with jitter
-                        delay = self.retry_base_delay * (2 ** attempt) + random.uniform(0, 5)
-                        logger.warning(
-                            f"LLM API error on {current_model} (attempt {attempt + 1}/{max_attempts}). "
-                            f"Falling back to {next_model}. Retrying in {delay:.1f}s... Error: {e}"
+
+                        delay = (
+                            self.retry_base_delay
+                            * (2 ** attempt)
+                            + random.uniform(0, 5)
                         )
-                        pool_index = next_model_index
-                    
+
+                        logger.warning(
+                            f"LLM error on {current_model}. "
+                            f"Falling back to {next_model}. "
+                            f"Retrying in {delay:.1f}s. "
+                            f"Error: {e}"
+                        )
+
+                    pool_index = next_model_index
+
                     time.sleep(delay)
+
                     continue
 
-        # All retries exhausted with all models
-        failed_model = model_pool[pool_index % len(model_pool)]
+        failed_model = model_pool[
+            pool_index % len(model_pool)
+        ]
+
         logger.error(
-            f"All {max_attempts} attempts exhausted across models {model_pool}. "
-            f"Last failed model: {failed_model}. Last error: {last_exception}"
+            f"All attempts exhausted across models: "
+            f"{model_pool}. "
+            f"Last failed model: {failed_model}. "
+            f"Last error: {last_exception}"
         )
+
         raise last_exception
 
 
@@ -304,7 +357,10 @@ def _create_client(
     api_key: Optional[str] = None,
     fallback_models: Optional[List[str]] = None,
 ) -> LLMClient:
-    """Create an LLMClient instance with config-based defaults."""
+    """
+    Create configured LLM client.
+    """
+
     return LLMClient(
         model=model,
         api_key=api_key,
@@ -313,14 +369,13 @@ def _create_client(
         retry_base_delay=config.LLM_RETRY_BASE_DELAY,
         daily_budget=config.LLM_DAILY_REQUEST_BUDGET,
         request_delay=config.LLM_REQUEST_DELAY_SECONDS,
-        fallback_models=fallback_models or config.LLM_FALLBACK_MODELS,
+        fallback_models=fallback_models
+        or config.LLM_FALLBACK_MODELS,
     )
 
 
-# --- Global Client Instances ---
+# Global primary client
 
-# Primary client (used by score_jobs, resume_parser, custom_resume_generator)
-# Uses configured fallback strategy: Gemini → OpenAI → Groq
 primary_client = _create_client(
     model=config.LLM_MODEL,
     api_key=config.LLM_API_KEY,
